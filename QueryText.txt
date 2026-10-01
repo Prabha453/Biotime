@@ -1,0 +1,49 @@
+===================== Break Time Implementation [15-09-2026] ======================
+
+ALTER TABLE att_breaktime RENAME COLUMN end_margin TO break_in_above_margin;
+
+ALTER TABLE att_breaktime
+  ADD COLUMN start_date date NULL,
+  ADD COLUMN end_date date NULL,
+  ADD COLUMN break_out_ahead_margin integer NOT NULL DEFAULT 60,
+  ADD COLUMN break_out_above_margin integer NOT NULL DEFAULT 60,
+  ADD COLUMN break_in_ahead_margin integer NOT NULL DEFAULT 60;
+
+===================== Pending Migrations Applied via `php spark migrate` [21-09-2026] ======================
+
+-- 2026-09-09-000001_AddPayrollIdentityNumbers
+
+ALTER TABLE payroll_emppayrollprofile
+  ADD COLUMN national_num varchar(50) NULL,
+  ADD COLUMN internal_emp_num varchar(50) NULL;
+
+-- 2026-09-06-000001_AddAuthUserLockout  (login lockout, ZKBioTime's own auth_user table)
+
+ALTER TABLE auth_user
+  ADD COLUMN failed_attempts integer NOT NULL DEFAULT 0,
+  ADD COLUMN locked_until timestamp NULL;
+
+===================== Company Schedule — new table [24-09-2026] ======================
+
+-- 2026-09-24-000001_AddCompanyScheduleTable
+-- Not a ZKBioTime table — this app's own addition, so Company Schedule has a
+-- real page/list to back it instead of silently fanning out into
+-- att_departmentschedule rows. Modelled column-for-column on
+-- att_departmentschedule (department_id -> company_id). Resolved by
+-- AttendanceCalculator::shiftForEmployee() between Department and Group.
+
+CREATE TABLE att_companyschedule (
+  id            serial PRIMARY KEY,
+  create_time   timestamp NULL,
+  create_user   varchar(255) NULL,
+  change_time   timestamp NULL,
+  change_user   varchar(255) NULL,
+  status        smallint NOT NULL DEFAULT 0,
+  start_date    date NOT NULL,
+  end_date      date NOT NULL,
+  company_id    integer NOT NULL,
+  shift_id      integer NOT NULL
+);
+
+CREATE INDEX att_companyschedule_company_id ON att_companyschedule (company_id);
+CREATE INDEX att_companyschedule_shift_id   ON att_companyschedule (shift_id);

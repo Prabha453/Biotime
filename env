@@ -1,0 +1,22 @@
+# Copy this file to .env and enter your installation's settings.
+CI_ENVIRONMENT = development
+
+app.baseURL = 'http://localhost:8080/'
+app.forceGlobalSecureRequests = false
+app.CSPEnabled = false
+
+# Connect to an existing ZKBioTime PostgreSQL database.
+database.default.hostname = localhost
+database.default.database = post_sql_db
+database.default.username = postgres
+database.default.password = ''
+database.default.DBDriver = Postgre
+database.default.DBPrefix = ''
+database.default.port = 5432
+database.default.schema = public
+database.default.charset = utf8
+
+# Generate a unique key for each installation; never commit the real key.
+encryption.key = ''
+
+logger.threshold = 4

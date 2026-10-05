@@ -35,7 +35,7 @@ php spark db:seed UserSeeder  # admin@example.com / admin123
 php spark serve --port 8080
 ```
 
-Open <http://localhost:8080/> → login → dashboard.
+Open <http://127.0.0.1:8080/> → login → dashboard.
 
 ## How attendance is calculated
 

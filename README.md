@@ -8,7 +8,7 @@ PHP spark serve
 On each computer, install PHP 8.2+ with the required extensions, run
 `composer install`, and configure `.env` for that computer's PostgreSQL
 hostname, port, database, username and password. Set `app.baseURL` to
-`http://localhost:8080/`. PostgreSQL must already be running (locally as a
+`http://127.0.0.1:8080/`. PostgreSQL must already be running (locally as a
 Windows service or on a reachable database server). Its installation path
 is not needed by this launcher; it does not install or start PostgreSQL.
 

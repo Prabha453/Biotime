@@ -4,6 +4,7 @@ namespace App\Controllers;
 
 use App\Libraries\Xlsx;
 use App\Libraries\XlsxReader;
+use App\Libraries\ImportValidationException;
 
 /**
  * Personnel bulk import — ZKBioTime's per-list "Import" action.
@@ -43,6 +44,7 @@ class Imports extends BaseController
                 'The header row is required.',
                 "'Employee ID' is required and must be unique.",
                 'Department / Position / Area / Company accept either the code or the name.',
+                'For multiple areas, separate their codes with commas (for example 202,203).',
                 'Gender is M, F or O. Employment Type is 1 (Permanent), 2 (Temporary) or 3 (Probation).',
                 'Existing employees (matched on Employee ID) are updated; new ones are created.',
             ],
@@ -94,7 +96,7 @@ class Imports extends BaseController
             'cols'   => ['Employee ID' => 'emp_code', 'Leave Type' => 'leave_type', 'Year' => 'year', 'Entitlement Days' => 'entitlement_days', 'Carried Forward' => 'pre_balance'],
             'req'    => ['Employee ID', 'Leave Type'],
             'sample' => [['10001', 'Annual Leave', '2026', '21', '3'], ['10001', 'Sick Leave', '2026', '10', '0']],
-            'notes'  => ['The header row is required.', "'Employee ID' and 'Leave Type' are required.", 'Leave Type accepts the pay-code (e.g. AL) or its name.', 'Year defaults to the current year. Days may be decimal.'],
+            'notes'  => ['The header row is required.', "'Employee ID' and 'Leave Type' are required.", 'Leave Type accepts the pay-code (e.g. AL) or its name.', 'Year defaults to the current year. Days must be whole numbers (0-32767).'],
         ],
     ];
 
@@ -176,7 +178,7 @@ class Imports extends BaseController
         }
         $file = $this->request->getFile('file');
         if (! $file || ! $file->isValid()) {
-            return redirect()->back()->with('error', 'Choose a file to import.');
+            return redirect()->back()->with('import_errors', ['File: ' . ($file ? $file->getErrorString() : 'Choose a file to import.')]);
         }
 
         $overwrite = $this->request->getPost('existing') === 'overwrite';
@@ -185,6 +187,8 @@ class Imports extends BaseController
             $result = in_array($type, ['photos', 'documents'], true)
                 ? $this->importZip($type, $file)
                 : $this->importTable($type, $file, $overwrite);
+        } catch (ImportValidationException $e) {
+            return redirect()->back()->with('import_errors', $e->errors);
         } catch (\Throwable $e) {
             log_message('error', "import {$type}: " . $e->getMessage());
 
@@ -211,7 +215,9 @@ class Imports extends BaseController
     /** Read a .csv or .xlsx file into a list of raw string rows. */
     private function rawRows($file): array
     {
-        $ext = strtolower($file->getExtension() ?: '');
+        // XLSX is a ZIP container and can be detected as application/zip.
+        // Select the parser by filename; the parser validates the contents.
+        $ext = strtolower($file->getClientExtension() ?: '');
         if ($ext === 'xlsx') {
             return XlsxReader::rows($file->getTempName());
         }
@@ -229,25 +235,46 @@ class Imports extends BaseController
             return $out;
         }
 
-        throw new \RuntimeException('Expected a .xlsx or .csv file.');
+        throw new ImportValidationException(['File: Expected Excel (.xlsx), CSV (.csv), or comma-separated text (.txt).']);
     }
 
     private function importTable(string $type, $file, bool $overwrite = true): array
     {
-        $raw = $this->rawRows($file);
+        try {
+            $raw = $this->rawRows($file);
+        } catch (ImportValidationException $e) {
+            throw $e;
+        } catch (\RuntimeException $e) {
+            throw new ImportValidationException(['File: ' . $e->getMessage()]);
+        }
+        $headerRow = 1;
         // drop leading fully-empty rows, then take the first as the header
         while ($raw && count(array_filter($raw[0], static fn ($v) => trim((string) $v) !== '')) === 0) {
             array_shift($raw);
+            $headerRow++;
         }
         if (! $raw) {
-            throw new \RuntimeException('The file is empty.');
+            throw new ImportValidationException(['File: The file is empty.']);
         }
         $header = $this->mapHeader($type, array_shift($raw));
+        $missing = array_filter(self::SPECS[$type]['req'],
+            static fn ($label) => ! in_array(self::SPECS[$type]['cols'][$label], $header, true));
+        if ($missing) {
+            throw new ImportValidationException(['Row ' . $headerRow . ': Missing required columns: ' . implode(', ', $missing) . '. Download the import template for the expected headers.']);
+        }
+        $knownHeaders = array_values(self::SPECS[$type]['cols']);
+        $usedHeaders = array_values(array_intersect($header, $knownHeaders));
+        if (count($usedHeaders) !== count(array_unique($usedHeaders))) {
+            throw new ImportValidationException(['Row ' . $headerRow . ': Duplicate column headers. Keep only one column for each field.']);
+        }
 
         $rows = [];
-        foreach ($raw as $line) {
+        foreach ($raw as $offset => $line) {
             if (count(array_filter($line, static fn ($v) => trim((string) $v) !== '')) === 0) {
                 continue;
+            }
+            if (count($line) > count($header) && array_filter(array_slice($line, count($header)), static fn ($v) => trim((string) $v) !== '')) {
+                throw new ImportValidationException(['Row ' . ($headerRow + $offset + 1) . ': Extra values have no column header. Check the template and CSV separators.']);
             }
             $line   = array_pad(array_slice($line, 0, count($header)), count($header), null);
             $row    = array_combine($header, $line);
@@ -256,13 +283,14 @@ class Imports extends BaseController
                 && in_array(strtolower(trim((string) ($row['emp_code'] ?? $row['dept_code'] ?? $row['position_code'] ?? $row['area_code'] ?? $row['cert_code'] ?? ''))), ['employee id', 'department code', 'position code', 'area code', 'code'], true)) {
                 continue;
             }
-            $rows[] = $row;
+            $rows[$headerRow + $offset + 1] = $row;
         }
         if (! $rows) {
-            throw new \RuntimeException('No data rows found.');
+            throw new ImportValidationException(['File: No data rows found below the header.']);
         }
 
         $db  = db_connect();
+        $this->validateRows($type, $rows, $db);
         $res = ['created' => 0, 'updated' => 0, 'skipped' => 0];
         $now = date('Y-m-d H:i:sP');
 
@@ -293,7 +321,7 @@ class Imports extends BaseController
             return $r ? (int) $r['id'] : null;
         };
 
-        $ok = $this->tx(function ($db) use ($type, $rows, &$res, $now, $companyId, $lookup, $overwrite) {
+        $write = function ($db) use ($type, $rows, &$res, $now, $companyId, $lookup, $overwrite) {
             foreach ($rows as $r) {
                 switch ($type) {
                     case 'employees':
@@ -310,7 +338,7 @@ class Imports extends BaseController
                             'hire_date'     => $this->date($r['hire_date'] ?? null),
                             'emp_type'      => in_array((int) ($r['emp_type'] ?? 0), [1, 2, 3], true) ? (int) $r['emp_type'] : null,
                         ], static fn ($v) => $v !== null);
-                        $areaId = $lookup('personnel_area', ['area_code', 'area_name'], $r['area'] ?? null);
+                        $areaIds = $this->resolveAreas($db, (string) ($r['area'] ?? ''));
                         $existing = $db->table('personnel_employee')->select('id')->where('emp_code', $code)->get()->getRowArray();
                         if ($existing && ! $overwrite) { $res['skipped']++; break; }
                         if ($existing) {
@@ -331,9 +359,11 @@ class Imports extends BaseController
                             $db->table('payroll_emppayrollprofile')->insert(['employee_id' => $eid, 'payment_mode' => 1, 'payment_type' => 1]);
                             $res['created']++;
                         }
-                        if ($areaId) {
+                        if ($areaIds) {
                             $db->table('personnel_employee_area')->where('employee_id', $eid)->delete();
-                            $db->table('personnel_employee_area')->insert(['employee_id' => $eid, 'area_id' => $areaId]);
+                            foreach ($areaIds as $areaId) {
+                                $db->table('personnel_employee_area')->insert(['employee_id' => $eid, 'area_id' => $areaId]);
+                            }
                         }
                         break;
 
@@ -344,7 +374,9 @@ class Imports extends BaseController
                         break;
 
                     case 'positions':
-                        $this->upsertOrg($db, 'personnel_position', 'position_code', 'position_name', $r, $res, $companyId, [], $overwrite);
+                        $this->upsertOrg($db, 'personnel_position', 'position_code', 'position_name', $r, $res, $companyId, [
+                            'parent_position_id' => $lookup('personnel_position', ['position_code'], $r['parent_code'] ?? null),
+                        ], $overwrite);
                         break;
 
                     case 'areas':
@@ -356,7 +388,7 @@ class Imports extends BaseController
                     case 'leavebalance':
                         $emp = $lookup('personnel_employee', ['emp_code'], $r['emp_code'] ?? null);
                         $pc  = $lookup('att_paycode', ['code', 'name'], $r['leave_type'] ?? null);
-                        $yr  = (int) ($r['year'] ?? date('Y'));
+                        $yr  = (int) (trim((string) ($r['year'] ?? '')) ?: date('Y'));
                         if (! $emp || ! $pc || $yr < 2000) { $res['skipped']++; break; }
                         $row = [
                             'entitlement_days' => (int) round((float) ($r['entitlement_days'] ?? 0)),
@@ -437,12 +469,172 @@ class Imports extends BaseController
                         break;
                 }
             }
-        });
-        if (! $ok) {
-            throw new \RuntimeException('a database error rolled the import back (duplicate code, or a bad reference).');
+        };
+        $db->transBegin();
+        try {
+            $write($db);
+            if (! $db->transStatus() || ! $db->transCommit()) {
+                throw new \RuntimeException('Database write failed.');
+            }
+        } catch (\Throwable $e) {
+            $db->transRollback();
+            log_message('error', 'Import transaction: ' . $e->getMessage());
+            throw new \RuntimeException('No records were saved. A database constraint or linked-record change prevented the import. Check the codes and references, then retry.');
         }
 
         return $res;
+    }
+
+    /** Validate every data row before the first database write. */
+    private function validateRows(string $type, array $rows, $db): void
+    {
+        $spec = self::SPECS[$type];
+        $errors = [];
+        $seen = [];
+        $lengths = ['emp_code' => 20, 'first_name' => 100, 'last_name' => 100,
+            'dept_code' => 50, 'dept_name' => 200, 'position_code' => 50,
+            'position_name' => 100, 'area_code' => 30, 'area_name' => 100,
+            'cert_code' => 20, 'cert_name' => 100, 'reason' => 200];
+        $org = [
+            'departments' => ['personnel_department', 'dept_code'],
+            'positions' => ['personnel_position', 'position_code'],
+            'areas' => ['personnel_area', 'area_code'],
+        ];
+        $refs = [
+            'company' => ['personnel_company', ['company_code', 'company_name']],
+            'department' => ['personnel_department', ['dept_code', 'dept_name']],
+            'position' => ['personnel_position', ['position_code', 'position_name']],
+            'cert' => ['personnel_certification', ['cert_code', 'cert_name']],
+            'leave_type' => ['att_paycode', ['code', 'name']],
+        ];
+        if (in_array($type, ['employeecerts', 'resign', 'leavebalance'], true)) {
+            $refs['emp_code'] = ['personnel_employee', ['emp_code']];
+        }
+        $identities = [];
+        foreach ($rows as $number => $row) {
+            $resolved = [];
+            $add = static function (string $field, string $message) use (&$errors, $number): void {
+                $errors[] = "Row {$number} — {$field}: {$message}";
+            };
+            foreach ($spec['req'] as $label) {
+                if (trim((string) ($row[$spec['cols'][$label]] ?? '')) === '') {
+                    $add($label, 'Required value is missing.');
+                }
+            }
+            foreach ($spec['cols'] as $label => $key) {
+                $value = trim((string) ($row[$key] ?? ''));
+                if ($key === 'area' && $value !== '') {
+                    try {
+                        $this->resolveAreas($db, $value);
+                    } catch (\RuntimeException $e) {
+                        $add($label, $e->getMessage());
+                    }
+                }
+                if (isset($lengths[$key]) && mb_strlen($value) > $lengths[$key]) {
+                    $add($label, 'Maximum length is ' . $lengths[$key] . ' characters.');
+                }
+                if ($value !== '' && isset($refs[$key])) {
+                    [$table, $columns] = $refs[$key];
+                    $query = $db->table($table)->groupStart();
+                    foreach ($columns as $i => $column) {
+                        $i === 0 ? $query->where($column, $value) : $query->orWhere($column, $value);
+                    }
+                    $matches = $query->select('id')->groupEnd()->get()->getResultArray();
+                    $count = count($matches);
+                    $resolved[$key] = $count === 1 ? $matches[0]['id'] : $value;
+                    if ($count !== 1) {
+                        $add($label, $count === 0 ? 'No matching code or name exists. Import or create it first.' : 'Multiple records match. Use a unique code.');
+                    }
+                }
+                if ($value !== '' && in_array($key, ['hire_date', 'expire_on', 'resign_date'], true)) {
+                    $parsed = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+                    if (! $parsed || $parsed->format('Y-m-d') !== $value) {
+                        $add($label, 'Use a valid date in YYYY-MM-DD format.');
+                    }
+                }
+                if ($value !== '' && in_array($key, ['email_alert', 'disable_att'], true)
+                    && ! in_array(strtolower($value), ['y', 'yes', '1', 'true', 't', 'n', 'no', '0', 'false', 'f'], true)) {
+                    $add($label, 'Use Y or N.');
+                }
+                $max = ['before' => 2147483647, 'entitlement_days' => 32767, 'pre_balance' => 32767][$key] ?? null;
+                if ($value !== '' && $max !== null && (! ctype_digit($value) || (float) $value > $max)) {
+                    $add($label, "Use a whole number from 0 to {$max}.");
+                }
+                if ($key === 'year' && $value !== '' && (! ctype_digit($value) || (int) $value < 2000 || (int) $value > 9999)) {
+                    $add($label, 'Use a year from 2000 to 9999, or leave blank for the current year.');
+                }
+                if ($key === 'resign_type' && $value !== '' && ! in_array(strtolower($value), ['1', '2', '3', '4', '5', 'quit', 'dismissed', 'resignation', 'transfer', 'retain job without salary'], true)) {
+                    $add($label, 'Use Quit, Dismissed, Resignation, Transfer, Retain job without salary, or 1-5.');
+                }
+            }
+            $identity = match ($type) {
+                'employeecerts' => [$resolved['emp_code'] ?? '', $resolved['cert'] ?? ''],
+                'leavebalance' => [$resolved['emp_code'] ?? '', $resolved['leave_type'] ?? '', trim((string) ($row['year'] ?? '')) ?: date('Y')],
+                'resign' => [$resolved['emp_code'] ?? ''],
+                default => null,
+            };
+            if ($identity !== null) {
+                $key = json_encode($identity);
+                if (isset($identities[$key])) { $add('Record', 'Duplicate record; first used on row ' . $identities[$key] . '.'); }
+                $identities[$key] = $number;
+            }
+            $codeKey = $type === 'employees' ? 'emp_code' : ($type === 'certifications' ? 'cert_code' : ($org[$type][1] ?? null));
+            $code = trim((string) ($row[$codeKey ?? ''] ?? ''));
+            if ($codeKey && $code !== '') {
+                if (isset($seen[$code])) {
+                    $add(array_search($codeKey, $spec['cols'], true), 'Duplicate code in this file; first used on row ' . $seen[$code] . '.');
+                }
+            }
+            if (isset($org[$type])) {
+                $parent = trim((string) ($row['parent_code'] ?? ''));
+                if ($parent !== '') {
+                    [$table, $column] = $org[$type];
+                    if ($parent === $code) {
+                        $add('Parent', 'A record cannot be its own parent.');
+                    } elseif (! isset($seen[$parent]) && ! $db->table($table)->where($column, $parent)->countAllResults()) {
+                        $add('Parent', 'No matching parent code exists. Place the parent before this row or import it first.');
+                    }
+                }
+            }
+            if ($code !== '') { $seen[$code] = $number; }
+            if ($type === 'employees') {
+                $email = trim((string) ($row['email'] ?? ''));
+                if ($email !== '' && ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                    $add('Email', 'Enter a valid email address.');
+                }
+                $gender = strtoupper(trim((string) ($row['gender'] ?? '')));
+                if ($gender !== '' && ! in_array($gender, ['M', 'F', 'O'], true)) {
+                    $add('Gender', 'Use M, F or O.');
+                }
+                $employment = trim((string) ($row['emp_type'] ?? ''));
+                if ($employment !== '' && ! in_array($employment, ['1', '2', '3'], true)) {
+                    $add('Employment Type', 'Use 1 (Permanent), 2 (Temporary) or 3 (Probation).');
+                }
+            }
+        }
+        if ($errors) { throw new ImportValidationException($errors); }
+    }
+
+    private function resolveAreas($db, string $value): array
+    {
+        $value = trim($value);
+        if ($value === '') { return []; }
+        $find = static fn (string $part): array => $db->table('personnel_area')->select('id')
+            ->groupStart()->where('area_code', $part)->orWhere('area_name', $part)->groupEnd()->get()->getResultArray();
+        // Preserve existing area names that themselves contain a comma.
+        $exact = $find($value);
+        if (count($exact) === 1) { return [(int) $exact[0]['id']]; }
+        if (count($exact) > 1) { throw new \RuntimeException('Multiple areas match. Use unique area codes.'); }
+        $ids = [];
+        foreach (explode(',', $value) as $part) {
+            $part = trim($part);
+            $matches = $part === '' ? [] : $find($part);
+            if (count($matches) !== 1) {
+                throw new \RuntimeException('Area "' . $part . '" must match one existing code or name. Import the area first or use its unique code.');
+            }
+            $ids[] = (int) $matches[0]['id'];
+        }
+        return array_values(array_unique($ids));
     }
 
     private function upsertOrg($db, string $table, string $codeCol, string $nameCol, array $r, array &$res, callable $companyId, array $extra, bool $overwrite = true): void
@@ -466,7 +658,8 @@ class Imports extends BaseController
             $db->table($table)->where('id', $ex['id'])->update($data);
             $res['updated']++;
         } else {
-            $db->table($table)->insert($data + [$codeCol => $code, 'company_id' => $company, 'is_default' => false]);
+            $defaults = $table === 'personnel_area' ? ['employee_count' => 0, 'device_count' => 0] : [];
+            $db->table($table)->insert($data + [$codeCol => $code, 'company_id' => $company, 'is_default' => false] + $defaults);
             $res['created']++;
         }
     }
@@ -491,69 +684,123 @@ class Imports extends BaseController
 
     private function importZip(string $type, $file): array
     {
-        if (strtolower($file->getExtension() ?: '') !== 'zip') {
-            throw new \RuntimeException('Expected a .zip file.');
+        if (strtolower($file->getClientExtension()) !== 'zip') {
+            throw new ImportValidationException(['File: Expected a ZIP archive (.zip).']);
         }
         $zip = new \ZipArchive();
         if ($zip->open($file->getTempName()) !== true) {
-            throw new \RuntimeException('Could not open the archive.');
+            throw new ImportValidationException(['File: Could not read the ZIP archive.']);
         }
-
-        $db      = db_connect();
-        $res     = ['matched' => 0, 'skipped' => 0];
+        $db = db_connect();
         $isPhoto = $type === 'photos';
-        $dir     = FCPATH . 'assets/' . ($isPhoto ? 'photos' : 'documents');
-        if (! is_dir($dir)) {
-            @mkdir($dir, 0775, true);
-        }
-        $okExt = $isPhoto ? ['jpg', 'jpeg', 'png', 'gif'] : ['jpg', 'jpeg', 'png', 'pdf', 'doc', 'docx'];
-
-        for ($i = 0; $i < $zip->numFiles; $i++) {
-            $name = $zip->getNameIndex($i);
-            if (substr($name, -1) === '/') {
-                continue;
-            }
-            $base = basename($name);
-            $ext  = strtolower(pathinfo($base, PATHINFO_EXTENSION));
-            $stem = pathinfo($base, PATHINFO_FILENAME);
-            if (! in_array($ext, $okExt, true)) {
-                $res['skipped']++;
-                continue;
-            }
-
-            if ($isPhoto) {
-                $emp = $db->table('personnel_employee')->select('id, emp_code')->where('emp_code', $stem)->get()->getRowArray();
-                if (! $emp) { $res['skipped']++; continue; }
-                $safe = preg_replace('/[^A-Za-z0-9_-]/', '', $emp['emp_code']) . '.' . $ext;
-                if (file_put_contents("{$dir}/{$safe}", $zip->getFromIndex($i)) !== false) {
-                    $db->table('personnel_employee')->where('id', $emp['id'])->update(['photo' => 'photo/' . $safe, 'update_time' => date('Y-m-d H:i:sP')]);
-                    $res['matched']++;
-                } else {
-                    $res['skipped']++;
+        $dir = FCPATH . 'assets/' . ($isPhoto ? 'photos' : 'documents');
+        $extensions = $isPhoto ? ['jpg', 'jpeg', 'png', 'gif'] : ['jpg', 'jpeg', 'png', 'gif', 'pdf', 'doc', 'docx'];
+        $errors = $pending = $seen = [];
+        $total = 0;
+        try {
+            for ($i = 0; $i < $zip->numFiles; $i++) {
+                $name = $zip->getNameIndex($i);
+                if (str_ends_with($name, '/')) { continue; }
+                $base = basename(str_replace('\\', '/', $name));
+                // Ignore operating-system archive metadata.
+                if (str_starts_with($name, '__MACOSX/') || str_starts_with($base, '._') || $base === '.DS_Store') { continue; }
+                $ext = strtolower(pathinfo($base, PATHINFO_EXTENSION));
+                $stem = pathinfo($base, PATHINFO_FILENAME);
+                if (! in_array($ext, $extensions, true)) {
+                    $errors[] = "{$base}: Unsupported file format. Allowed: " . implode(', ', $extensions) . '.';
+                    continue;
                 }
-            } else {
-                // <emp_code>_<cert_code> or just <emp_code>
-                [$empCode, $certCode] = array_pad(explode('_', $stem, 2), 2, null);
-                $emp = $db->table('personnel_employee')->select('id')->where('emp_code', $empCode)->get()->getRowArray();
-                if (! $emp) { $res['skipped']++; continue; }
-                $cert = $certCode
-                    ? $db->table('personnel_employeecertification ec')->select('ec.id')
-                        ->join('personnel_certification c', 'c.id = ec.certification_id')
-                        ->where('ec.employee_id', $emp['id'])->where('c.cert_code', $certCode)->get()->getRowArray()
-                    : $db->table('personnel_employeecertification')->select('id')->where('employee_id', $emp['id'])->orderBy('id')->get()->getRowArray();
-                if (! $cert) { $res['skipped']++; continue; }
-                $safe = $emp['id'] . '-' . (int) $cert['id'] . '-' . time() . '.' . $ext;
-                if (file_put_contents("{$dir}/{$safe}", $zip->getFromIndex($i)) !== false) {
-                    $db->table('personnel_employeecertification')->where('id', $cert['id'])
-                        ->update(['file' => 'document/' . $safe, 'file_name' => mb_substr($base, 0, 200)]);
-                    $res['matched']++;
+                $size = (int) ($zip->statIndex($i)['size'] ?? 0);
+                $total += $size;
+                if ($size > 20 * 1024 * 1024 || $total > 100 * 1024 * 1024) {
+                    $errors[] = "{$base}: Maximum size is 20 MB per file and 100 MB per archive after extraction.";
+                    break;
+                }
+                $data = $zip->getFromIndex($i);
+                if ($data === false || $data === '') {
+                    $errors[] = "{$base}: File is empty or unreadable.";
+                    continue;
+                }
+                if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif'], true)) {
+                    $info = @getimagesizefromstring($data);
+                    $expected = ['jpg' => IMAGETYPE_JPEG, 'jpeg' => IMAGETYPE_JPEG, 'png' => IMAGETYPE_PNG, 'gif' => IMAGETYPE_GIF][$ext];
+                    if (! $info || $info[2] !== $expected) {
+                        $errors[] = "{$base}: Contents do not match the image format.";
+                        continue;
+                    }
+                }
+                if ($isPhoto) {
+                    $record = $db->table('personnel_employee')->select('id')->where('emp_code', $stem)->get()->getRowArray();
                 } else {
-                    $res['skipped']++;
+                    // Prefer the complete employee code, including any underscores.
+                    $employee = $db->table('personnel_employee')->select('id')->where('emp_code', $stem)->get()->getRowArray();
+                    $record = $employee ? $db->table('personnel_employeecertification')->select('id')
+                        ->where('employee_id', $employee['id'])->orderBy('id')->get()->getRowArray() : null;
+                    if (! $employee) {
+                        $matches = [];
+                        for ($split = 0; $split < strlen($stem); $split++) {
+                            if ($stem[$split] !== '_') { continue; }
+                            $match = $db->table('personnel_employeecertification ec')->select('ec.id')
+                                ->join('personnel_employee e', 'e.id = ec.employee_id')
+                                ->join('personnel_certification c', 'c.id = ec.certification_id')
+                                ->where('e.emp_code', substr($stem, 0, $split))
+                                ->where('c.cert_code', substr($stem, $split + 1))->get()->getResultArray();
+                            foreach ($match as $m) { $matches[$m['id']] = $m; }
+                        }
+                        if (count($matches) > 1) {
+                            $errors[] = "{$base}: Filename matches multiple employee certifications. Use an unambiguous employee/certification code.";
+                            continue;
+                        }
+                        $record = $matches ? reset($matches) : null;
+                    }
+                }
+                if (! $record) {
+                    $errors[] = "{$base}: No matching " . ($isPhoto ? 'employee' : 'employee certification') . ' exists. Check the filename and create the record first.';
+                    continue;
+                }
+                $id = (int) $record['id'];
+                if (isset($seen[$id])) {
+                    $errors[] = "{$base}: Duplicate attachment for the same record as {$seen[$id]}.";
+                    continue;
+                }
+                $seen[$id] = $base;
+                $safe = $id . '-' . bin2hex(random_bytes(12)) . '.' . $ext;
+                $pending[] = ['id' => $id, 'name' => $base, 'safe' => $safe, 'data' => $data];
+            }
+        } finally {
+            $zip->close();
+        }
+        if ($errors) { throw new ImportValidationException($errors); }
+        if (! $pending) { throw new ImportValidationException(['Archive: No importable files found.']); }
+        if (! is_dir($dir) && ! mkdir($dir, 0775, true) && ! is_dir($dir)) {
+            throw new \RuntimeException('Could not create the attachment folder. No files were imported.');
+        }
+        $written = [];
+        $db->transBegin();
+        try {
+            foreach ($pending as $item) {
+                $path = $dir . '/' . $item['safe'];
+                $written[] = $path;
+                if (file_put_contents($path, $item['data']) !== strlen($item['data'])) {
+                    throw new \RuntimeException('Could not save ' . $item['name']);
+                }
+                $table = $isPhoto ? 'personnel_employee' : 'personnel_employeecertification';
+                $values = $isPhoto
+                    ? ['photo' => 'photo/' . $item['safe'], 'update_time' => date('Y-m-d H:i:sP')]
+                    : ['file' => 'document/' . $item['safe'], 'file_name' => mb_substr($item['name'], 0, 200)];
+                if (! $db->table($table)->where('id', $item['id'])->update($values) || $db->affectedRows() !== 1) {
+                    throw new \RuntimeException('Could not update the attachment record.');
                 }
             }
+            if (! $db->transStatus() || ! $db->transCommit()) {
+                throw new \RuntimeException('Could not commit attachment records.');
+            }
+        } catch (\Throwable $e) {
+            $db->transRollback();
+            foreach ($written as $path) { if (is_file($path)) { unlink($path); } }
+            log_message('error', 'ZIP import: ' . $e->getMessage());
+            throw new \RuntimeException('No attachments were changed. Could not save the archive; check storage permissions and linked records.');
         }
-        $zip->close();
-
-        return $res;
+        return ['matched' => count($pending), 'skipped' => 0];
     }
 }

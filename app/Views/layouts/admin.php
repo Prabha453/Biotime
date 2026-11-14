@@ -365,6 +365,16 @@ $nav = [
     <div class="content">
 
         <main class="page-body">
+            <?php $importErrors = session()->getFlashdata('import_errors') ?? []; ?>
+            <?php if ($importErrors): ?>
+                <div class="alert alert-danger" role="alert">
+                    <strong>Import validation failed. No records were saved.</strong>
+                    <p class="mb-1">Correct the following errors in your file, then upload it again.</p>
+                    <ul class="mb-0 ps-3" style="max-height: 320px; overflow-y: auto;">
+                        <?php foreach ($importErrors as $error): ?><li><?= esc($error) ?></li><?php endforeach; ?>
+                    </ul>
+                </div>
+            <?php endif; ?>
             <?php $vErrors = session()->getFlashdata('errors') ?? []; ?>
             <?php if ($vErrors): ?>
                 <div class="alert alert-danger">

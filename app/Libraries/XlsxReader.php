@@ -44,7 +44,9 @@ class XlsxReader
                     $rid = (string) $first->attributes('r', true)->id;
                     foreach ($relsXml->Relationship as $rel) {
                         if ((string) $rel['Id'] === $rid) {
-                            $sheetPath = 'xl/' . ltrim((string) $rel['Target'], '/');
+                            $target = (string) $rel['Target'];
+                            $sheetPath = str_starts_with($target, '/')
+                                ? ltrim($target, '/') : 'xl/' . $target;
                             break;
                         }
                     }
@@ -64,6 +66,14 @@ class XlsxReader
 
         $out = [];
         foreach ($xml->sheetData->row as $row) {
+            // Preserve worksheet row numbers even when Excel omits blank rows.
+            $rowNumber = (int) $row['r'];
+            if ($rowNumber > 1048576) {
+                throw new \RuntimeException('Invalid worksheet row number.');
+            }
+            while (count($out) < $rowNumber - 1) {
+                $out[] = [];
+            }
             $cells = [];
             $max   = 0;
             foreach ($row->c as $c) {
@@ -103,7 +113,7 @@ class XlsxReader
             return (string) $si->t;
         }
         $s = '';
-        foreach ($si->r as $r) {          // rich-text runs
+        foreach ($si->r ?? [] as $r) {          // rich-text runs (empty inline cells have no runs)
             $s .= (string) $r->t;
         }
 

@@ -211,9 +211,9 @@
             const ret = trg.getAttribute('data-import-ret') || '';
             const spec = specs[type];
             const form = document.getElementById('importModalForm');
+            form.reset();
             form.action = (window.__importAction || '').replace('__TYPE__', type);
             form.querySelector('[name="return"]').value = ret;
-            form.reset();
             modal.querySelector('.modal-title').textContent = 'Import' + (spec ? ' — ' + spec.label : '');
 
             const tpl = document.getElementById('importModalTemplate');

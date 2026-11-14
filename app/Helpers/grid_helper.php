@@ -88,7 +88,8 @@ if (! function_exists('grid_toolbar')) {
             . $left
             . ($right !== '' ? '<span class="ms-auto d-flex flex-wrap gap-2">' . $right . '</span>' : '')
             . '</div>'
-            . grid_shared_modals();
+            . grid_shared_modals()
+            . (! empty($cfg['import']) ? grid_import_specs_json([$cfg['import']]) : '');
     }
 }
 
@@ -216,7 +217,9 @@ if (! function_exists('grid_shared_modals')) {
             <div class="row g-3">
                 <div class="col-md-7">
                     <label class="form-label tiny">Import File <span class="text-danger">*</span></label>
-                    <input type="file" name="file" class="form-control form-control-sm" accept=".xlsx,.csv,.txt" required>
+                    <input type="file" name="file" class="form-control form-control-sm" accept=".xlsx,.csv,.txt" aria-describedby="importModalFileHint" required>
+                    <div id="importModalFileHint" class="form-text">Supported formats: Excel (.xlsx), CSV (.csv), or comma-separated text (.txt). Use the template headers.</div>
+                    <div class="form-text">All rows are validated before saving. If any row has an error, no records are saved. Dates must use YYYY-MM-DD.</div>
                 </div>
                 <div class="col-md-5">
                     <label class="form-label tiny">Language <span class="text-danger">*</span></label>
@@ -280,12 +283,13 @@ if (! function_exists('grid_import_specs_json')) {
                     'headers' => array_keys($s['cols']),
                     'sample'  => $s['sample'],
                     'notes'   => $s['notes'],
+                    'tpl'     => route_to('imports.template', $t),
                 ];
             }
         }
 
-        return '<script>Object.assign(JSON.parse(document.getElementById("importModalSpecs").textContent||"{}"),'
-            . json_encode($out) . ') && (document.getElementById("importModalSpecs").textContent = JSON.stringify('
-            . json_encode($out) . '));</script>';
+        return '<script>document.getElementById("importModalSpecs").textContent = JSON.stringify(Object.assign('
+            . 'JSON.parse(document.getElementById("importModalSpecs").textContent||"{}"),'
+            . json_encode($out, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) . '));</script>';
     }
 }

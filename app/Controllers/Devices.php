@@ -150,14 +150,18 @@ class Devices extends BaseController
             return redirect()->back()->with('error', 'Nothing selected.');
         }
         $db = db_connect();
-        $this->tx(function ($db) use ($ids) {
+        $ok = $this->tx(function ($db) use ($ids) {
             foreach (['iclock_terminalcommand', 'iclock_terminalcommandlog', 'iclock_terminallog',
                 'iclock_terminaluploadlog', 'iclock_errorcommandlog', 'iclock_terminalparameter'] as $t) {
                 $db->table($t)->whereIn('terminal_id', $ids)->delete();
             }
             $db->table('iclock_transaction')->whereIn('terminal_id', $ids)->update(['terminal_id' => null]);
+            $db->table('ep_eptransaction')->whereIn('terminal_id', $ids)->update(['terminal_id' => null]);
             $db->table('iclock_terminal')->whereIn('id', $ids)->delete();
-        }, 'Could not delete the selected devices.');
+        });
+        if (! $ok) {
+            return redirect()->to(route_to('devices'))->with('error', 'Could not delete the selected devices.');
+        }
         $this->audit('device.bulk_delete', count($ids) . ' devices');
 
         return redirect()->to(route_to('devices'))->with('success', 'Deleted ' . count($ids) . ' device(s).');

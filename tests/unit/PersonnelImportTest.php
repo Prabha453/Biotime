@@ -136,27 +136,28 @@ final class PersonnelImportTest extends CIUnitTestCase
             $multiArea = $this->upload("Employee ID,Area\n10001,\"HO,HO-2F,HO\"\n", 'multi-area.csv');
             $this->import('employees', $multiArea);
             self::assertSame(3, $db->table('personnel_employee_area')->countAllResults(), 'Both areas are assigned without duplicate links.');
-            try {
-                $this->import('employees', $this->upload("Employee ID,Area\n10001,\"HO,MISSING\"\n", 'bad-area.csv'));
-                self::fail('Unknown areas must reject the whole row.');
-            } catch (\App\Libraries\ImportValidationException $e) {
-                self::assertStringContainsString('MISSING', implode(' ', $e->errors));
-            }
-            self::assertSame(3, $db->table('personnel_employee_area')->countAllResults());
+            $result = $this->import('employees', $this->upload("Employee ID,Area\n10001,\"HO,MISSING\"\n", 'bad-area.csv'));
+            self::assertSame(1, $result['updated']);
+            $result = $this->import('employees', $this->upload("Employee ID,Department Name,Position Name,Area Name\nOPTIONAL,Missing,Missing,Missing\n", 'optional.csv'));
+            self::assertSame(1, $result['created']);
+            $optional = $db->table('personnel_employee')->where('emp_code', 'OPTIONAL')->get()->getRowArray();
+            self::assertNull($optional['department_id']);
+            self::assertNull($optional['position_id']);
+            self::assertSame(2, $db->table('personnel_employee_area')->countAllResults());
             $this->import('employees', $this->upload("Employee ID,Area\n10001,HO\n", 'single-area.csv'), false);
-            self::assertSame(3, $db->table('personnel_employee_area')->countAllResults(), 'Ignore preserves existing area assignments.');
-            self::assertSame(2, $db->table('att_attemployee')->countAllResults());
+            self::assertSame(2, $db->table('personnel_employee_area')->countAllResults(), 'Ignore preserves existing area assignments.');
+            self::assertSame(3, $db->table('att_attemployee')->countAllResults());
             $invalid = $this->upload("Employee ID,Email,Gender,Hired Date,Department,Employment Type\nNEW1,valid@example.com,M,2026-11-14,Development,1\nNEW2,bad-email,X,2026-02-30,Missing,9\nNEW2,,,,,\n", 'invalid.csv');
             try {
                 $this->import('employees', $invalid);
                 self::fail('Invalid rows must reject the entire import.');
             } catch (\App\Libraries\ImportValidationException $e) {
                 $messages = implode("\n", $e->errors);
-                foreach (['Row 3 — Email', 'Row 3 — Gender', 'Row 3 — Hired Date', 'Row 3 — Department', 'Row 3 — Employment Type', 'Row 4 — Employee ID'] as $expected) {
+                foreach (['Row 3 — Email', 'Row 3 — Gender', 'Row 3 — Hired Date', 'Row 3 — Employment Type', 'Row 4 — Employee ID'] as $expected) {
                     self::assertStringContainsString($expected, $messages);
                 }
             }
-            self::assertSame(2, $db->table('personnel_employee')->countAllResults(), 'No valid rows from an invalid file may be saved.');
+            self::assertSame(3, $db->table('personnel_employee')->countAllResults(), 'No valid rows from an invalid file may be saved.');
             $invalidExcel = (new Xlsx())->headers(['Employee ID', 'Email'])->row(['EXCEL1', 'valid@example.com'])->row([])->row(['EXCEL2', 'bad-email']);
             try {
                 $this->import('employees', $this->upload($invalidExcel->build(), 'invalid.xlsx'));
@@ -164,7 +165,7 @@ final class PersonnelImportTest extends CIUnitTestCase
             } catch (\App\Libraries\ImportValidationException $e) {
                 self::assertStringContainsString('Row 4 — Email', implode("\n", $e->errors));
             }
-            self::assertSame(2, $db->table('personnel_employee')->countAllResults());
+            self::assertSame(3, $db->table('personnel_employee')->countAllResults());
             foreach (['departments' => 'Department', 'positions' => 'Position', 'areas' => 'Area'] as $type => $label) {
                 $invalid = $this->upload("{$label} Code,{$label} Name\nNEW,Valid\nBAD,\n", "$type.csv");
                 try {
@@ -288,3 +289,7 @@ final class PersonnelImportTest extends CIUnitTestCase
         self::assertStringContainsString('&lt;script&gt;example&lt;/script&gt;', $html);
     }
 }
+
+
+
+

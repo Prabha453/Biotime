@@ -44,7 +44,8 @@ class Imports extends BaseController
                 'The header row is required.',
                 "'Employee ID' is required and must be unique.",
                 'Department / Position / Area / Company accept either the code or the name.',
-                'For multiple areas, separate their codes with commas (for example 202,203).',
+                'Department, Position and Area are optional: unique matching names or codes are linked; missing or ambiguous matches are left unassigned.',
+                'For multiple areas, separate their names with commas (for example Head Office, Warehouse).',
                 'Gender is M, F or O. Employment Type is 1 (Permanent), 2 (Temporary) or 3 (Probation).',
                 'Existing employees (matched on Employee ID) are updated; new ones are created.',
             ],
@@ -163,6 +164,9 @@ class Imports extends BaseController
         $spec = self::SPECS[$type]['cols'] ?? [];
         $norm = static fn (string $s): string => preg_replace('/[^a-z0-9]/', '', strtolower(trim($s)));
         $byLabel = [];
+        if ($type === 'employees') {
+            $byLabel += ['departmentname' => 'department', 'positionname' => 'position', 'areaname' => 'area'];
+        }
         foreach ($spec as $label => $key) {
             $byLabel[$norm($label)] = $key;
             $byLabel[$norm($key)]   = $key;
@@ -218,7 +222,7 @@ class Imports extends BaseController
         // XLSX is a ZIP container and can be detected as application/zip.
         // Select the parser by filename; the parser validates the contents.
         $ext = strtolower($file->getClientExtension() ?: '');
-        if ($ext === 'xlsx') {
+        if (in_array($ext, ['xlsx', 'xls'], true)) {
             return XlsxReader::rows($file->getTempName());
         }
         if (in_array($ext, ['csv', 'txt'], true)) {
@@ -316,7 +320,8 @@ class Imports extends BaseController
             foreach ($cols as $i => $c) {
                 $i === 0 ? $b->where($c, $v) : $b->orWhere($c, $v);
             }
-            $r = $b->groupEnd()->get()->getRowArray();
+            $matches = $b->groupEnd()->get()->getResultArray();
+            $r = count($matches) === 1 ? $matches[0] : null;
 
             return $r ? (int) $r['id'] : null;
         };
@@ -523,7 +528,7 @@ class Imports extends BaseController
             }
             foreach ($spec['cols'] as $label => $key) {
                 $value = trim((string) ($row[$key] ?? ''));
-                if ($key === 'area' && $value !== '') {
+                if ($key === 'area' && $value !== '' && $type !== 'employees') {
                     try {
                         $this->resolveAreas($db, $value);
                     } catch (\RuntimeException $e) {
@@ -542,7 +547,7 @@ class Imports extends BaseController
                     $matches = $query->select('id')->groupEnd()->get()->getResultArray();
                     $count = count($matches);
                     $resolved[$key] = $count === 1 ? $matches[0]['id'] : $value;
-                    if ($count !== 1) {
+                    if ($count !== 1 && ! ($type === 'employees' && in_array($key, ['department', 'position'], true))) {
                         $add($label, $count === 0 ? 'No matching code or name exists. Import or create it first.' : 'Multiple records match. Use a unique code.');
                     }
                 }
@@ -624,13 +629,13 @@ class Imports extends BaseController
         // Preserve existing area names that themselves contain a comma.
         $exact = $find($value);
         if (count($exact) === 1) { return [(int) $exact[0]['id']]; }
-        if (count($exact) > 1) { throw new \RuntimeException('Multiple areas match. Use unique area codes.'); }
+        if (count($exact) > 1) { return []; }
         $ids = [];
         foreach (explode(',', $value) as $part) {
             $part = trim($part);
             $matches = $part === '' ? [] : $find($part);
             if (count($matches) !== 1) {
-                throw new \RuntimeException('Area "' . $part . '" must match one existing code or name. Import the area first or use its unique code.');
+                continue;
             }
             $ids[] = (int) $matches[0]['id'];
         }

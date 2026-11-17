@@ -16,8 +16,8 @@
         const del = document.querySelector('[data-grid-delete]');
         if (!bar || !del) return;
 
-        const scope = document.querySelector('[data-crud-results]') || document;
-        const boxes = () => [...scope.querySelectorAll('.grid-check')];
+        const scope = () => document.querySelector('[data-crud-results]') || document;
+        const boxes = () => [...scope().querySelectorAll('.grid-check')];
         const checked = () => boxes().filter((b) => b.checked);
 
         function refresh() {
@@ -25,7 +25,7 @@
             const cnt = del.querySelector('[data-grid-count]');
             if (cnt) cnt.textContent = n;
             del.disabled = n === 0;
-            const all = scope.querySelector('#gridCheckAll');
+            const all = scope().querySelector('#gridCheckAll');
             if (all) {
                 all.checked = n > 0 && n === boxes().length;
                 all.indeterminate = n > 0 && n < boxes().length;
@@ -36,14 +36,15 @@
         // above), not `scope`: scope can resolve to the bare `document`
         // object on pages with no [data-crud-results], and `document.dataset`
         // does not exist, which would throw if we guarded on it instead.
-        if (!bar.dataset.bulkBound) {
-            bar.dataset.bulkBound = '1';
-            scope.addEventListener('change', (e) => {
+        const results = scope();
+        if (!results._bulkChangeHandler) {
+            results._bulkChangeHandler = (e) => {
                 if (e.target.id === 'gridCheckAll') {
                     boxes().forEach((b) => (b.checked = e.target.checked));
                 }
                 if (e.target.classList.contains('grid-check') || e.target.id === 'gridCheckAll') refresh();
-            });
+            };
+            results.addEventListener('change', results._bulkChangeHandler);
         }
 
         if (!del.dataset.bound) {

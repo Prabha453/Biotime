@@ -217,7 +217,7 @@ if (! function_exists('grid_shared_modals')) {
             <div class="row g-3">
                 <div class="col-md-7">
                     <label class="form-label tiny">Import File <span class="text-danger">*</span></label>
-                    <input type="file" name="file" class="form-control form-control-sm" accept=".xlsx,.csv,.txt" aria-describedby="importModalFileHint" required>
+                    <input type="file" name="file" class="form-control form-control-sm" accept=".xlsx,.xls,.csv,.txt" aria-describedby="importModalFileHint" required>
                     <div id="importModalFileHint" class="form-text">Supported formats: Excel (.xlsx), CSV (.csv), or comma-separated text (.txt). Use the template headers.</div>
                     <div class="form-text">All rows are validated before saving. If any row has an error, no records are saved. Dates must use YYYY-MM-DD.</div>
                 </div>
@@ -293,3 +293,4 @@ if (! function_exists('grid_import_specs_json')) {
             . json_encode($out, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) . '));</script>';
     }
 }
+

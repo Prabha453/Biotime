@@ -18,7 +18,7 @@
             <div class="mb-3">
                 <label class="form-label"><?= $isZip ? 'ZIP archive' : 'Excel (.xlsx) or CSV file' ?><?= req() ?></label>
                 <input type="file" name="file" class="form-control" required
-                    accept="<?= $isZip ? '.zip' : '.xlsx,.csv,.txt,text/csv' ?>" aria-describedby="importFileHint">
+                    accept="<?= $isZip ? '.zip' : '.xlsx,.xls,.csv,.txt,text/csv' ?>" aria-describedby="importFileHint">
                 <div id="importFileHint" class="form-text">
                     <?= $isZip ? 'Supported format: ZIP archive (.zip).' : 'Supported formats: Excel (.xlsx), CSV (.csv), or comma-separated text (.txt). Use the template headers.' ?>
                 </div>
